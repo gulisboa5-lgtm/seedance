@@ -1,0 +1,7 @@
+# A chave NUNCA vai pro repositorio. No Render ela entra como variavel de ambiente.
+.env
+fotos/
+saidas/
+*.log
+__pycache__/
+.DS_Store

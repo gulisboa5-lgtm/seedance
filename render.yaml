@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: seedance
+    runtime: python
+    plan: free
+    buildCommand: ""
+    startCommand: python seedance.py --web
+    healthCheckPath: /saude
+    envVars:
+      - key: SEEDANCE_SALVAR_LOCAL
+        value: "0"
+      - key: ATLASCLOUD_API_KEY
+        sync: false
+      - key: SEEDANCE_SENHA
+        sync: false
