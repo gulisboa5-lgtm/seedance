@@ -15,6 +15,8 @@ Documentacao usada (api.atlascloud.ai, 16/09/2026):
 
 import json
 import base64
+import hashlib
+import hmac
 import http.cookies
 import mimetypes
 import os
@@ -229,15 +231,23 @@ def baixar(url, nome=None):
 # Senha de entrada. Vazia = sem senha (uso local). Na internet e OBRIGATORIA:
 # sem ela, qualquer um que achar o endereco gera video com o seu saldo.
 SENHA = os.environ.get("SEEDANCE_SENHA", "").strip()
-SESSOES = {}          # bilhete -> quando expira
 TRABALHOS = {}        # ficha -> {"status", "url", "arquivo", "erro"}
 SALVAR_LOCAL = os.environ.get("SEEDANCE_SALVAR_LOCAL", "1") != "0"
 
 
 def novo_bilhete():
-    b = secrets.token_urlsafe(24)
-    SESSOES[b] = time.time() + 30 * 24 * 3600
-    return b
+    """Crachá que se prova sozinho: validade + assinatura feita com a senha.
+
+    Nada fica guardado na memória do servidor. No plano grátis o Render
+    reinicia o processo o tempo todo, e uma lista em memória some junto --
+    o usuário era expulso no meio do trabalho com "entre de novo".
+    """
+    ate = str(int(time.time()) + 30 * 24 * 3600)
+    return ate + "." + _assinar(ate)
+
+
+def _assinar(texto):
+    return hmac.new(SENHA.encode(), texto.encode(), hashlib.sha256).hexdigest()
 
 
 def bilhete_vale(cabecalhos):
@@ -248,13 +258,12 @@ def bilhete_vale(cabecalhos):
         b = http.cookies.SimpleCookie(bruto).get("seed")
     except Exception:
         return False
-    if not b:
+    if not b or "." not in b.value:
         return False
-    quando = SESSOES.get(b.value)
-    if not quando or quando < time.time():
-        SESSOES.pop(b.value, None)
+    ate, assinatura = b.value.rsplit(".", 1)
+    if not ate.isdigit() or int(ate) < time.time():
         return False
-    return True
+    return secrets.compare_digest(assinatura, _assinar(ate))
 
 
 ESTILO = """
@@ -338,6 +347,14 @@ sem permissao, ou feito pra passar por verdadeiro, e problema legal de quem publ
 </div>
 <script>
 const $ = s => document.querySelector(s);
+
+// Se o cracha caiu (servidor reiniciou, validade venceu), volta pra tela de senha
+// em vez de mostrar um "entre de novo" sem saida.
+const chamar = async (url, opc) => {
+  const r = await fetch(url, opc);
+  if (r.status === 401) { location.reload(); throw new Error('sessao expirada'); }
+  return r.json();
+};
 $('#modo').onchange = () => {
   const m = $('#modo').value;
   $('#campo-arquivos').style.display = m === 'texto' ? 'none' : 'block';
@@ -357,9 +374,8 @@ const subir = async arquivos => {
   const urls = [];
   for (const f of arquivos) {
     $('#log').textContent = 'Enviando ' + f.name + '...';
-    const r = await fetch('/subir', {method:'POST', headers:{'Content-Type':'application/json'},
-                                     body: JSON.stringify(await lerArquivo(f))});
-    const j = await r.json();
+    const j = await chamar('/subir', {method:'POST', headers:{'Content-Type':'application/json'},
+                                      body: JSON.stringify(await lerArquivo(f))});
     if (!j.ok) throw new Error(j.erro);
     urls.push(j.url);
   }
@@ -385,15 +401,14 @@ $('#ir').onclick = async () => {
     if (modo === 'referencia') corpo.referencias = urls;
 
     $('#log').textContent = 'Mandando o pedido...';
-    const r = await fetch('/gerar', {method:'POST', headers:{'Content-Type':'application/json'},
-                                     body: JSON.stringify(corpo)});
-    const j = await r.json();
+    const j = await chamar('/gerar', {method:'POST', headers:{'Content-Type':'application/json'},
+                                      body: JSON.stringify(corpo)});
     if (!j.ok) throw new Error(j.erro);
 
     // Pergunta de 4 em 4 segundos. Nao segura conexao aberta: na internet ela cairia.
     while (true) {
       await new Promise(p => setTimeout(p, 4000));
-      const s = await (await fetch('/situacao?ficha=' + j.ficha)).json();
+      const s = await chamar('/situacao?ficha=' + j.ficha);
       if (s.status === 'pronto') {
         $('#log').textContent = 'Pronto.' + (s.arquivo ? ' Salvo em: ' + s.arquivo : '');
         $('#player').src = s.url; $('#player').style.display = 'block';
@@ -482,6 +497,7 @@ class Servidor(BaseHTTPRequestHandler):
                 threading.Thread(target=_trabalhar, args=(ficha,), daemon=True).start()
                 return self._json({"ok": True, "ficha": ficha})
         except Exception as e:
+            print("ERRO em %s: %s" % (self.path, e), flush=True)
             return self._json({"ok": False, "erro": str(e)})
 
         return self._responder(404, "text/plain", b"nada aqui")
@@ -517,7 +533,7 @@ def main():
     CHAVE = ler_chave()
     args = sys.argv[1:]
     if not args or args[0] in ("--web", "-w"):
-        return web(int(args[1]) if len(args) > 1 else 8777)
+        return web(int(args[1]) if len(args) > 1 else None)
 
     modo = args[0]
     if modo not in MODELOS:
