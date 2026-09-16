@@ -203,10 +203,9 @@ def esperar(ficha, avisar=print, teto_segundos=1800):
             avisar("Status: %s" % status)
             ultimo = status
         if status in ("completed", "succeeded"):
-            saidas = d.get("outputs") or []
-            if not saidas:
+            if not (d.get("outputs") or []):
                 raise RuntimeError("terminou sem arquivo de saida")
-            return saidas[0]
+            return d
         if status in ("failed", "canceled"):
             raise RuntimeError(d.get("error") or ("geracao %s" % status))
         time.sleep(3)
@@ -224,6 +223,40 @@ def baixar(url, nome=None):
                 break
             f.write(pedaco)
     return destino
+
+
+def cotacao_do_dolar():
+    """Dolar de hoje. Se a consulta falhar, devolve None: preco em real some da
+    tela, mas o em dolar continua -- melhor faltar do que mostrar valor errado."""
+    agora = time.time()
+    if _COTACAO["quando"] > agora - 3600:
+        return _COTACAO["valor"]
+    try:
+        req = urllib.request.Request(
+            "https://economia.awesomeapi.com.br/json/last/USD-BRL",
+            headers={"User-Agent": NAVEGADOR})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            _COTACAO["valor"] = float(json.loads(r.read())["USDBRL"]["bid"])
+    except Exception:
+        _COTACAO["valor"] = None
+    _COTACAO["quando"] = agora
+    return _COTACAO["valor"]
+
+
+_COTACAO = {"valor": None, "quando": 0.0}
+
+
+def custo(preco):
+    """Monta o texto do custo a partir do preco em dolar que a Atlas devolveu."""
+    try:
+        usd = float(preco)
+    except (TypeError, ValueError):
+        return None
+    real = cotacao_do_dolar()
+    texto = "US$ %.2f" % usd
+    if real:
+        texto += " (R$ %.2f)" % (usd * real)
+    return texto
 
 
 # ---------------------------------------------------------------- telinha
@@ -410,7 +443,8 @@ $('#ir').onclick = async () => {
       await new Promise(p => setTimeout(p, 4000));
       const s = await chamar('/situacao?ficha=' + j.ficha);
       if (s.status === 'pronto') {
-        $('#log').textContent = 'Pronto.' + (s.arquivo ? ' Salvo em: ' + s.arquivo : '');
+        $('#log').textContent = 'Pronto.' + (s.custo ? '  Custo: ' + s.custo : '')
+                              + (s.arquivo ? '\nSalvo em: ' + s.arquivo : '');
         $('#player').src = s.url; $('#player').style.display = 'block';
         $('#baixar').href = s.url; $('#baixar').style.display = 'inline-block';
         break;
@@ -428,9 +462,11 @@ $('#modo').onchange();
 def _trabalhar(ficha):
     """Roda em linha separada: espera o video e, se for local, baixa."""
     try:
-        url = esperar(ficha, avisar=lambda m: TRABALHOS[ficha].update(status=m))
+        d = esperar(ficha, avisar=lambda m: TRABALHOS[ficha].update(status=m))
+        url = d["outputs"][0]
         arquivo = baixar(url) if SALVAR_LOCAL else None
-        TRABALHOS[ficha] = {"status": "pronto", "url": url, "arquivo": arquivo}
+        TRABALHOS[ficha] = {"status": "pronto", "url": url, "arquivo": arquivo,
+                            "custo": custo(d.get("price"))}
     except Exception as e:
         TRABALHOS[ficha] = {"status": "erro", "erro": str(e)}
 
@@ -552,8 +588,11 @@ def main():
             raise SystemExit('uso: python3 seedance.py referencia "descricao" ref1.jpg ref2.mp4')
         ficha = gerar("referencia", args[1], referencias=args[2:])
 
-    url = esperar(ficha)
-    print("Salvo em: " + baixar(url))
+    d = esperar(ficha)
+    print("Salvo em: " + baixar(d["outputs"][0]))
+    quanto = custo(d.get("price"))
+    if quanto:
+        print("Custo deste take: " + quanto)
 
 
 if __name__ == "__main__":
